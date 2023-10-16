@@ -234,7 +234,7 @@ class PaperTTY:
 
     def init_display(self):
         """Initialize the display - call the driver's init method"""
-        self.driver.init(partial=self.partial, vcom=self.vcom)
+        self.driver.init(partial=self.partial)
         self.initialized = True
 
     def fit(self, portrait=False):
@@ -461,7 +461,8 @@ def get_drivers():
     Format: { '<NAME>': { 'desc': '<DESCRIPTION>', 'class': <CLASS> }, ... }"""
     driverdict = {}
     driverlist = [drivers_partial.EPD1in54, drivers_partial.EPD2in13,
-                  drivers_partial.EPD2in13v2, drivers_partial.EPD2in9,
+                  drivers_partial.EPD2in13v2, drivers_partial.EPD2in13v3,
+                  drivers_partial.EPD2in9,
                   drivers_partial.EPD2in13d, driver_4in2.EPD4in2,
 
                   drivers_full.EPD2in7, drivers_full.EPD3in7, drivers_full.EPD7in5,
