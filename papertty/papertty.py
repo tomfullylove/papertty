@@ -28,7 +28,7 @@ RESOURCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resour
 
 class PaperTTY:
     """The main class - handles various settings and showing text on the display"""
-    defaultfont = os.path.join(RESOURCE_PATH, "tom-thumb.pil")
+    defaultfont = os.path.join(RESOURCE_PATH, "Andale_Mono.ttf")
     defaultsize = 8
     partial = False
     initialized = None
