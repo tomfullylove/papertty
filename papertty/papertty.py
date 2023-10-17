@@ -11,40 +11,17 @@
 #
 # Requires Python 3
 
-# display drivers - note: they are GPL licensed, unlike this file
-import papertty.drivers.drivers_base as drivers_base
-import papertty.drivers.drivers_partial as drivers_partial
-import papertty.drivers.drivers_full as drivers_full
-import papertty.drivers.drivers_color as drivers_color
-import papertty.drivers.drivers_colordraw as drivers_colordraw
-import papertty.drivers.driver_it8951 as driver_it8951
-import papertty.drivers.drivers_4in2 as driver_4in2
-
-# for ioctl
 import fcntl
-# for validating type of and access to device files
 import os
-# for gracefully handling signals (systemd service)
 import signal
-# for unpacking virtual console data
 import struct
-# for stdin and exit
 import sys
-import select
-# for setting TTY size
 import termios
-# for sleeping
 import time
-# for command line usage
 import click
-# for drawing
-from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
-# for tidy driver list
-from collections import OrderedDict
-# for VNC
-from vncdotool import api
-# for reading stdin data for use with Pillow
-from io import BytesIO
+from PIL import Image, ImageChops, ImageDraw, ImageFont
+
+from .drivers.driver import Driver
 
 # resource path
 RESOURCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources")
@@ -53,8 +30,7 @@ class PaperTTY:
     """The main class - handles various settings and showing text on the display"""
     defaultfont = os.path.join(RESOURCE_PATH, "tom-thumb.pil")
     defaultsize = 8
-    driver = None
-    partial = None
+    partial = False
     initialized = None
     font = None
     fontsize = None
@@ -64,16 +40,15 @@ class PaperTTY:
     black = None
     encoding = None
     spacing = 0
-    vcom = None
     cursor = None
     rows = None
     cols = None
     is_truetype = None
     fontfile = None
 
-    def __init__(self, driver, font=defaultfont, fontsize=defaultsize, partial=None, encoding='utf-8', spacing=0, cursor=None, vcom=None):
+    def __init__(self, font=defaultfont, fontsize=defaultsize, partial=None, encoding='utf-8', spacing=0, cursor=None):
         """Create a PaperTTY with the chosen driver and settings"""
-        self.driver = get_drivers()[driver]['class']()
+        self.driver = Driver()
         self.spacing = spacing
         self.fontsize = fontsize
         self.font = self.load_font(font) if font else None
@@ -82,7 +57,6 @@ class PaperTTY:
         self.black = self.driver.black
         self.encoding = encoding
         self.cursor = cursor
-        self.vcom = vcom
 
     def ready(self):
         """Check that the driver is loaded and initialized"""
@@ -118,16 +92,6 @@ class PaperTTY:
         return [s[begin:begin + n] for begin in range(0, len(s), n)]
 
     @staticmethod
-    def fold(text, width=None, filter_fn=None):
-        """Format a string to a specified width and/or filter it"""
-        buff = text
-        if width:
-            buff = ''.join([r + '\n' for r in PaperTTY.split(buff, int(width))]).rstrip()
-        if filter_fn:
-            buff = [c for c in buff if filter_fn(c)]
-        return buff
-
-    @staticmethod
     def img_diff(img1, img2):
         """Return the bounding box of differences between two images"""
         return ImageChops.difference(img1, img2).getbbox()
@@ -136,7 +100,7 @@ class PaperTTY:
     def ttydev(vcsa):
         """Return associated tty for vcsa device, ie. /dev/vcsa1 -> /dev/tty1"""
         return vcsa.replace("vcsa", "tty")
-    
+
     def vcsudev(self, vcsa):
         """Return character width and associated vcs(u) for vcsa device,
            ie. for /dev/vcsa1, retunr (4, "/dev/vcsu1") if vcsu is available, or
@@ -234,7 +198,7 @@ class PaperTTY:
 
     def init_display(self):
         """Initialize the display - call the driver's init method"""
-        self.driver.init(partial=self.partial)
+        self.driver.init()
         self.initialized = True
 
     def fit(self, portrait=False):
@@ -275,118 +239,6 @@ class PaperTTY:
         draw.rectangle([upper_left, lower_right], fill=self.white)
         return ImageChops.logical_xor(image, mask)
 
-    def showfb(self, fb_num, rotate=None, invert=False, sleep=1, full_interval=100):
-        """Render the framebuffer - basically a copy-paste of showvnc at this point"""
-        def _get_fb_info(fb_num):
-            config_dir = "/sys/class/graphics/fb%d/" % fb_num
-            size = None
-            bpp = None
-            with open(config_dir + "/virtual_size", "r") as f:
-                size = tuple([int(t) for t in f.read().strip().split(",")])
-            with open(config_dir + "/bits_per_pixel", "r") as f:
-                bpp = int(f.read().strip())
-            return (size,bpp)
-
-        def _get_fb_img(fb_num):
-            size, bpp = _get_fb_info(fb_num)
-            with open("/dev/fb%d" % fb_num, "rb") as f:
-                mode = "BGRX" if bpp == 32 else "BGR;16"
-                return Image.frombytes("RGB", size, f.read(), "raw", mode).convert("L")
-
-        previous_fb_img = None
-        diff_bbox = None
-        # number of updates; when it's 0, do a full refresh
-        updates = 0
-        while True:
-            new_fb_img = _get_fb_img(fb_num)
-            # apply rotation if any
-            if rotate:
-                new_fb_img = new_fb_img.rotate(rotate, expand=True)
-            # apply invert
-            if invert:
-                new_fb_img = ImageOps.invert(new_fb_img)
-            # rescale image if needed
-            if new_fb_img.size != (self.driver.width, self.driver.height):
-                new_fb_img = new_fb_img.resize((self.driver.width, self.driver.height))
-            # if at least two frames have been processed, get a bounding box of their difference region
-            if new_fb_img and previous_fb_img:
-                diff_bbox = self.band(self.img_diff(new_fb_img, previous_fb_img))
-            # frames differ, so we should update the display
-            if diff_bbox:
-                # increment update counter
-                updates = (updates + 1) % full_interval
-                # if partial update is supported and it's not time for a full refresh,
-                # draw just the different region
-                if updates > 0 and (self.driver.supports_partial and self.partial):
-                    print("partial ({}): {}".format(updates, diff_bbox))
-                    self.driver.draw(diff_bbox[0], diff_bbox[1], new_fb_img.crop(diff_bbox))
-                # if partial update is not possible or desired, do a full refresh
-                else:
-                    print("full ({}): {}".format(updates, new_fb_img.size))
-                    old_partial = self.partial
-                    self.partial = False
-                    self.driver.draw(0, 0, new_fb_img)
-                    self.partial = old_partial
-            # otherwise this is the first frame, so run a full refresh to get things going
-            else:
-                if updates == 0:
-                    updates = (updates + 1) % full_interval
-                    print("initial ({}): {}".format(updates, new_fb_img.size))
-                    self.driver.draw(0, 0, new_fb_img)
-            previous_fb_img = new_fb_img.copy()
-            time.sleep(float(sleep))
-
-
-
-    def showvnc(self, host, display, password=None, rotate=None, invert=False, sleep=1, full_interval=100):
-        with api.connect(':'.join([host, display]), password=password) as client:
-            previous_vnc_image = None
-            diff_bbox = None
-            # number of updates; when it's 0, do a full refresh
-            updates = 0
-            client.timeout = 30
-            while True:
-                try:
-                    client.refreshScreen()
-                except TimeoutError:
-                    print("Timeout to server {}:{}".format(host, display))
-                    client.disconnect()
-                    sys.exit(1)
-                new_vnc_image = client.screen
-                # apply rotation if any
-                if rotate:
-                    new_vnc_image = new_vnc_image.rotate(rotate, expand=True)
-                # apply invert
-                if invert:
-                    new_vnc_image = ImageOps.invert(new_vnc_image)
-                # rescale image if needed
-                if new_vnc_image.size != (self.driver.width, self.driver.height):
-                    new_vnc_image = new_vnc_image.resize((self.driver.width, self.driver.height))
-                # if at least two frames have been processed, get a bounding box of their difference region
-                if new_vnc_image and previous_vnc_image:
-                    diff_bbox = self.band(self.img_diff(new_vnc_image, previous_vnc_image))
-                # frames differ, so we should update the display
-                if diff_bbox:
-                    # increment update counter
-                    updates = (updates + 1) % full_interval
-                    # if partial update is supported and it's not time for a full refresh,
-                    # draw just the different region
-                    if updates > 0 and (self.driver.supports_partial and self.partial):
-                        print("partial ({}): {}".format(updates, diff_bbox))
-                        self.driver.draw(diff_bbox[0], diff_bbox[1], new_vnc_image.crop(diff_bbox))
-                    # if partial update is not possible or desired, do a full refresh
-                    else:
-                        print("full ({}): {}".format(updates, new_vnc_image.size))
-                        self.driver.draw(0, 0, new_vnc_image)
-                # otherwise this is the first frame, so run a full refresh to get things going
-                else:
-                    if updates == 0:
-                        updates = (updates + 1) % full_interval
-                        print("initial ({}): {}".format(updates, new_vnc_image.size))
-                        self.driver.draw(0, 0, new_vnc_image)
-                previous_vnc_image = new_vnc_image.copy()
-                time.sleep(float(sleep))
-
     def showtext(self, text, fill, cursor=None, portrait=False, flipx=False, flipy=False, oldimage=None):
         """Draw a string on the screen"""
         if self.ready():
@@ -420,7 +272,7 @@ class PaperTTY:
             if flipy:
                 image = image.transpose(Image.FLIP_TOP_BOTTOM)
             # find out which part changed and draw only that on the display
-            if oldimage and self.driver.supports_partial and self.partial:
+            if oldimage and self.partial:
                 # create a bounding box of the altered region and
                 # make the X coordinates divisible by 8
                 diff_bbox = self.band(self.img_diff(image, oldimage))
@@ -433,7 +285,7 @@ class PaperTTY:
             return image
         else:
             self.error("Display not ready")
-    
+
     def clear(self):
         """Clears the display; set all black, then all white, or use INIT mode, if driver supports it."""
         if self.ready():
@@ -455,204 +307,6 @@ class Settings:
         tty.init_display()
         return tty
 
-
-def get_drivers():
-    """Get the list of available drivers as a dict
-    Format: { '<NAME>': { 'desc': '<DESCRIPTION>', 'class': <CLASS> }, ... }"""
-    driverdict = {}
-    driverlist = [drivers_partial.EPD1in54, drivers_partial.EPD2in13,
-                  drivers_partial.EPD2in13v2, drivers_partial.EPD2in13v3,
-                  drivers_partial.EPD2in9,
-                  drivers_partial.EPD2in13d, driver_4in2.EPD4in2,
-
-                  drivers_full.EPD2in7, drivers_full.EPD3in7, drivers_full.EPD7in5,
-                  drivers_color.EPD7in5b_V2, drivers_full.EPD7in5v2,
-
-                  drivers_color.EPD4in2b, drivers_color.EPD7in5b,
-                  drivers_color.EPD5in83, drivers_color.EPD5in83b,
-                  drivers_color.EPD5in65f,
-
-                  drivers_colordraw.EPD1in54b, drivers_colordraw.EPD1in54c,
-                  drivers_colordraw.EPD2in13b, drivers_colordraw.EPD2in7b,
-                  drivers_colordraw.EPD2in9b,
-
-                  driver_it8951.IT8951,
-
-                  drivers_base.Dummy, drivers_base.Bitmap]
-    for driver in driverlist:
-        driverdict[driver.__name__] = {'desc': driver.__doc__, 'class': driver}
-    return driverdict
-
-
-def get_driver_list():
-    """Get a neat printable driver list"""
-    order = OrderedDict(sorted(get_drivers().items()))
-    return '\n'.join(["{}{}".format(driver.ljust(15), order[driver]['desc']) for driver in order])
-
-
-def display_image(driver, image, stretch=False, no_resize=False, fill_color="white", rotate=None, mirror=None, flip=None):
-    """
-    Display the given image using the given driver and options.
-    :param driver: device driver (subclass of `WaveshareEPD`)
-    :param image: image data to display
-    :param stretch: whether to stretch the image so that it fills the screen in both dimentions
-    :param no_resize: whether the image should not be resized if it does not fit the screen (will raise `RuntimeError`
-    if image is too large)
-    :param fill_color: colour to fill space when image is resized but one dimension does not fill the screen
-    :param rotate: rotate the image by arbitrary degrees
-    :param mirror: flip the image horizontally
-    :param flip: flip the image vertically
-    :return: the image that was rendered
-    """
-    if stretch and no_resize:
-        raise ValueError('Cannot set "no-resize" with "stretch"')
-
-    if mirror:
-        image = ImageOps.mirror(image)
-    if flip:
-        image = ImageOps.flip(image)
-    if rotate:
-        image = image.rotate(rotate, expand=True, fillcolor=fill_color)
-        
-    image_width, image_height = image.size
-
-    if stretch:
-        if (image_width, image_height) == (driver.width, driver.height):
-            output_image = image
-        else:
-            output_image = image.resize((driver.width, driver.height))
-    else:
-        if no_resize:
-            if image_width > driver.width or image_height > driver.height:
-                raise RuntimeError('Image ({0}x{1}) needs to be resized to fit the screen ({2}x{3})'
-                                   .format(image_width, image_height, driver.width, driver.height))
-            # Pad only
-            output_image = Image.new(image.mode, (driver.width, driver.height), color=fill_color)
-            output_image.paste(image, (0, 0))
-        else:
-            # Scales and pads
-            output_image = ImageOps.pad(image, (driver.width, driver.height), color=fill_color)
-
-    driver.draw(0, 0, output_image)
-
-    return output_image
-
-
-@click.group()
-@click.option('--driver', default=None, help='Select display driver')
-@click.option('--nopartial', is_flag=True, default=False, help="Don't use partial updates even if display supports it")
-@click.option('--encoding', default='latin_1', help='Encoding to use for the buffer', show_default=True)
-@click.pass_context
-def cli(ctx, driver, nopartial, encoding):
-    """Display stdin or TTY on a Waveshare e-Paper display"""
-    if not driver:
-        PaperTTY.error(
-            "You must choose a display driver. If your 'C' variant is not listed, use the 'B' driver.\n\n{}".format(
-                get_driver_list()))
-    else:
-        matched_drivers = [n for n in get_drivers() if n.lower() == driver.lower()]
-        if not matched_drivers:
-            PaperTTY.error('Invalid driver selection, choose from:\n{}'.format(get_driver_list()))
-        ctx.obj = Settings(driver=matched_drivers[0], partial=not nopartial, encoding=encoding)
-    pass
-
-
-@click.command(name='list')
-def list_drivers():
-    """List available display drivers"""
-    PaperTTY.error(get_driver_list(), code=0)
-
-
-@click.command()
-@click.option('--size', default=16, help='Stripe size to fill with (8-32)')
-@click.pass_obj
-def scrub(settings, size):
-    """Slowly fill with black, then white"""
-    if size not in range(8, 32 + 1):
-        PaperTTY.error("Invalid stripe size, must be 8-32")
-    ptty = settings.get_init_tty()
-    ptty.driver.scrub(fillsize=size)
-
-
-@click.command()
-@click.option('--font', default=PaperTTY.defaultfont, help='Path to a TrueType or PIL font',
-              show_default=True)
-@click.option('--size', 'fontsize', default=8, help='Font size', show_default=True)
-@click.option('--width', default=None, help='Fit to width [default: display width / font width]')
-@click.option('--portrait', default=False, is_flag=True, help='Use portrait orientation', show_default=True)
-@click.option('--nofold', default=False, is_flag=True, help="Don't fold the input", show_default=True)
-@click.option('--spacing', default='0', help='Line spacing for the text, "auto" to automatically determine a good value', show_default=True)
-@click.pass_obj
-def stdin(settings, font, fontsize, width, portrait, nofold, spacing):
-    """Display standard input and leave it on screen"""
-    settings.args['font'] = font
-    settings.args['fontsize'] = fontsize
-    settings.args['spacing'] = spacing
-    ptty = settings.get_init_tty()
-    text = sys.stdin.read()
-    if not nofold:
-        if width:
-            text = ptty.fold(text, width)
-        else:
-            font_width = ptty.font.getsize('M')[0]
-            max_width = int((ptty.driver.width - 8) / font_width) if portrait else int(ptty.driver.height / font_width)
-            text = ptty.fold(text, width=max_width)
-    ptty.showtext(text, fill=ptty.driver.black, portrait=portrait)
-
-
-@click.command()
-@click.option('--image', 'image_location', help='Location of image to display (omit for stdin)', show_default=True)
-@click.option('--stretch', default=False, is_flag=True, show_default=True,
-              help='Stretch image so that it fills the entire screen (may distort your image!)')
-@click.option('--no-resize', default=False, is_flag=True, show_default=True,
-              help='Do not resize image to fit the screen (an error will occur if the image is too large!)')
-@click.option('--fill-color', default='white', help='Colour to pad image with', show_default=True)
-@click.option('--mirror', default=False, is_flag=True, help='Mirror horizontally', show_default=True)
-@click.option('--flip', default=False, is_flag=True, help='Mirror vertically', show_default=True)
-@click.option('--rotate', default=0, help='Rotate the image by N degrees', show_default=True, type=float)
-@click.pass_obj
-def image(settings, image_location, stretch, no_resize, fill_color, mirror, flip, rotate):
-    """ Display an image """
-    if image_location is None or image_location == '-':
-        # XXX: logging to stdout, in line with the rest of this project
-        print('Reading image data from stdin... (set "--image" to load an image from a given file path)')
-        image_data = BytesIO(sys.stdin.buffer.read())
-        image = Image.open(image_data)
-    else:
-        image = Image.open(image_location)
-
-    ptty = settings.get_init_tty()
-    display_image(ptty.driver, image, stretch=stretch, no_resize=no_resize, fill_color=fill_color, rotate=rotate, mirror=mirror, flip=flip)
-
-
-@click.command()
-@click.option('--host', default="localhost", help="VNC host to connect to", show_default=True)
-@click.option('--display', default="0", help="VNC display to use (0 = port 5900)", show_default=True)
-@click.option('--password', default=None, help="VNC password")
-@click.option('--rotate', default=None, help="Rotate screen (90 / 180 / 270)")
-@click.option('--invert', default=False, is_flag=True, help="Invert colors")
-@click.option('--sleep', default=1, show_default=True, help="Refresh interval (s)", type=float)
-@click.option('--fullevery', default=50, show_default=True, help="# of partial updates between full updates")
-@click.pass_obj
-def vnc(settings, host, display, password, rotate, invert, sleep, fullevery):
-    """Display a VNC desktop"""
-    ptty = settings.get_init_tty()
-    ptty.showvnc(host, display, password, int(rotate) if rotate else None, invert, sleep, fullevery)
-
-
-@click.command()
-@click.option('--fb-num', default="0", help="Framebuffer to display (/dev/fbX)", show_default=True)
-@click.option('--rotate', default=None, help="Rotate screen (90 / 180 / 270)")
-@click.option('--invert', default=False, is_flag=True, help="Invert colors")
-@click.option('--sleep', default=1, show_default=True, help="Refresh interval (s)", type=float)
-@click.option('--fullevery', default=50, show_default=True, help="# of partial updates between full updates")
-@click.pass_obj
-def fb(settings, fb_num, rotate, invert, sleep, fullevery):
-    """Display the framebuffer"""
-    ptty = settings.get_init_tty()
-    ptty.showfb(int(fb_num), int(rotate) if rotate else None, invert, sleep, fullevery)
-
-
 @click.command()
 @click.option('--vcsa', default='/dev/vcsa1', help='Virtual console device (/dev/vcsa[1-63])', show_default=True)
 @click.option('--font', default=PaperTTY.defaultfont, help='Path to a TrueType or PIL font', show_default=True)
@@ -667,16 +321,14 @@ def fb(settings, fb_num, rotate, invert, sleep, fullevery):
 @click.option('--flipx', default=False, is_flag=True, help='Flip X axis (EXPERIMENTAL/BROKEN)', show_default=False)
 @click.option('--flipy', default=False, is_flag=True, help='Flip Y axis (EXPERIMENTAL/BROKEN)', show_default=False)
 @click.option('--spacing', default='0', help='Line spacing for the text, "auto" to automatically determine a good value', show_default=True)
-@click.option('--scrub', 'apply_scrub', is_flag=True, default=False, help='Apply scrub when starting up',
-              show_default=True)
 @click.option('--autofit', is_flag=True, default=False, help='Autofit terminal size to font size', show_default=True)
 @click.option('--attributes', is_flag=True, default=False, help='Use attributes', show_default=True)
 @click.option('--interactive', is_flag=True, default=False, help='Interactive mode')
-@click.option('--vcom', default=None, help='VCOM as positive value x 1000. eg. 1460 = -1.46V')
-@click.pass_obj
-def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, ttyrows, ttycols, portrait, flipx, flipy,
-             spacing, apply_scrub, autofit, attributes, interactive, vcom):
+def terminal(vcsa, font, fontsize, noclear, nocursor, cursor, sleep, ttyrows, ttycols, portrait, flipx, flipy,
+             spacing, autofit, attributes, interactive):
     """Display virtual console on an e-Paper display, exit with Ctrl-C."""
+    settings = Settings()
+
     settings.args['font'] = font
     settings.args['fontsize'] = fontsize
     settings.args['spacing'] = spacing
@@ -689,13 +341,6 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
         print("--nocursor is deprecated. Use --cursor=none instead")
         settings.args['cursor'] = None
 
-    if vcom:
-        vcom = int(vcom)
-        if vcom <= 0:
-            print("VCOM should be a positive number. It will be converted automatically. eg. For a value of -1.46V, set VCOM to 1460")
-            sys.exit(1)
-        settings.args['vcom'] = vcom
-
     if cursor == 'default' or cursor == 'legacy':
         settings.args['cursor'] = 'default'
     elif cursor == 'none':
@@ -705,14 +350,12 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
 
     ptty = settings.get_init_tty()
 
-    if apply_scrub:
-        ptty.driver.scrub()
     oldbuff = ''
     oldimage = None
     oldcursor = None
     # dirty - should refactor to make this cleaner
     flags = {'scrub_requested': False, 'show_menu': False, 'clear': False}
-    
+
     # handle SIGINT from `systemctl stop` and Ctrl-C
     def sigint_handler(sig, frame):
         if not interactive:
@@ -821,26 +464,18 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                 elif ch == 'r':
                     if oldimage:
                         ptty.driver.reset()
-                        ptty.driver.init(partial=False, vcom=self.vcom)
+                        ptty.driver.init()
                         ptty.driver.draw(0, 0, oldimage)
                         ptty.driver.reset()
-                        ptty.driver.init(partial=ptty.partial, vcom=self.vcom)
+                        ptty.driver.init()
 
-            # if user or SIGUSR1 toggled the scrub flag, scrub display and start with a fresh image
-            if flags['scrub_requested']:
-                ptty.driver.scrub()
-                # clear old image and buffer and restore flag
-                oldimage = None
-                oldbuff = ''
-                flags['scrub_requested'] = False
-            
             with open(vcsa, 'rb') as f:
                 with open(vcsudev, 'rb') as vcsu:
                     # read the first 4 bytes to get the console attributes
                     attributes = f.read(4)
                     rows, cols, x, y = list(map(ord, struct.unpack('cccc', attributes)))
 
-                    # read from the text buffer 
+                    # read from the text buffer
                     buff = vcsu.read()
                     if character_width == 4:
                         # work around weird bug
@@ -863,16 +498,5 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                         # delay before next update check
                         time.sleep(float(sleep))
 
-
-# add all the CLI commands
-cli.add_command(scrub)
-cli.add_command(terminal)
-cli.add_command(stdin)
-cli.add_command(image)
-cli.add_command(vnc)
-cli.add_command(fb)
-cli.add_command(list_drivers)
-
-
 if __name__ == '__main__':
-    cli()
+    terminal()
