@@ -321,11 +321,9 @@ class Settings:
 @click.option('--flipx', default=False, is_flag=True, help='Flip X axis (EXPERIMENTAL/BROKEN)', show_default=False)
 @click.option('--flipy', default=False, is_flag=True, help='Flip Y axis (EXPERIMENTAL/BROKEN)', show_default=False)
 @click.option('--spacing', default='0', help='Line spacing for the text, "auto" to automatically determine a good value', show_default=True)
-@click.option('--autofit', is_flag=True, default=False, help='Autofit terminal size to font size', show_default=True)
 @click.option('--attributes', is_flag=True, default=False, help='Use attributes', show_default=True)
-@click.option('--interactive', is_flag=True, default=False, help='Interactive mode')
 def terminal(vcsa, font, fontsize, noclear, nocursor, cursor, sleep, ttyrows, ttycols, portrait, flipx, flipy,
-             spacing, autofit, attributes, interactive):
+             spacing, attributes):
     """Display virtual console on an e-Paper display, exit with Ctrl-C."""
     settings = Settings()
 
@@ -358,14 +356,10 @@ def terminal(vcsa, font, fontsize, noclear, nocursor, cursor, sleep, ttyrows, tt
 
     # handle SIGINT from `systemctl stop` and Ctrl-C
     def sigint_handler(sig, frame):
-        if not interactive:
-            print("Exiting (SIGINT)...")
-            if not noclear:
-                ptty.showtext(oldbuff, fill=ptty.white, **textargs)
-            sys.exit(0)
-        else:
-             print('Showing menu, please wait ...')
-             flags['show_menu'] = True
+        print("Exiting (SIGINT)...")
+        if not noclear:
+            ptty.showtext(oldbuff, fill=ptty.white, **textargs)
+        sys.exit(0)
 
     # toggle scrub flag when SIGUSR1 received
     def sigusr1_handler(sig, frame):
@@ -383,92 +377,10 @@ def terminal(vcsa, font, fontsize, noclear, nocursor, cursor, sleep, ttyrows, tt
     if ptty.valid_vcsa(vcsa):
         if all([ttyrows, ttycols]):
             ptty.set_tty_size(ptty.ttydev(vcsa), ttyrows, ttycols)
-        else:
-            # if size not specified manually, see if autofit was requested
-            if autofit:
-                max_dim = ptty.fit(portrait)
-                print("Automatic resize of TTY to {} rows, {} columns".format(max_dim[1], max_dim[0]))
-                ptty.set_tty_size(ptty.ttydev(vcsa), max_dim[1], max_dim[0])
-        if interactive:
-            print("Started displaying {}, minimum update interval {} s, open menu with Ctrl-C".format(vcsa, sleep))
-        else:
-            print("Started displaying {}, minimum update interval {} s, exit with Ctrl-C".format(vcsa, sleep))
+
+        print("Started displaying {}, minimum update interval {} s, exit with Ctrl-C".format(vcsa, sleep))
         character_width, vcsudev = ptty.vcsudev(vcsa)
         while True:
-            if flags['show_menu']:
-                flags['show_menu'] = False
-                print()
-                print('Rendering paused. Enter')
-                print('    (f) to change font,')
-                print('    (s) to change spacing,')
-                if ptty.is_truetype:
-                    print('    (h) to change font size,')
-                print('    (c) to scrub,')
-                print('    (i) reinitialize display,')
-                print('    (r) do a full refresh,')
-                print('    (x) to exit,')
-                print('    anything else to continue.')
-                print('Command line arguments for current settings:\n    --font {} --size {} --spacing {}'.format(ptty.fontfile, ptty.fontsize, ptty.spacing))
-
-                ch = sys.stdin.readline().strip()
-                if ch == 'x':
-                    if not noclear:
-                        ptty.showtext(oldbuff, fill=ptty.white, **textargs)
-                    sys.exit(0)
-                elif ch == 'f':
-                    print('Current font: {}'.format(ptty.fontfile))
-                    new_font = click.prompt('Enter new font (leave empty to abort)', default='', show_default=False)
-                    if new_font:
-                        ptty.spacing = spacing
-                        ptty.font = ptty.load_font(new_font, keep_if_not_found=True)
-                        if autofit:
-                            max_dim = ptty.fit(portrait)
-                            print("Automatic resize of TTY to {} rows, {} columns".format(max_dim[1], max_dim[0]))
-                            ptty.set_tty_size(ptty.ttydev(vcsa), max_dim[1], max_dim[0])
-                        oldbuff = None
-                    else:
-                        print('Font not changed')
-                elif ch == 's':
-                    print('Current spacing: {}'.format(ptty.spacing))
-                    new_spacing = click.prompt('Enter new spacing (leave empty to abort)', default='empty', type=int, show_default=False)
-                    if new_spacing != 'empty':
-                        ptty.spacing = new_spacing
-                        ptty.recalculate_font(ptty.font)
-                        if autofit:
-                            max_dim = ptty.fit(portrait)
-                            print("Automatic resize of TTY to {} rows, {} columns".format(max_dim[1], max_dim[0]))
-                            ptty.set_tty_size(ptty.ttydev(vcsa), max_dim[1], max_dim[0])
-                        oldbuff = None
-                    else:
-                        print('Spacing not changed')
-                elif ch == 'h' and ptty.is_truetype:
-                    print('Current font size: {}'.format(ptty.fontsize))
-                    new_fontsize = click.prompt('Enter new font size (leave empty to abort)', default='empty', type=int, show_default=False)
-                    if new_fontsize != 'empty':
-                        ptty.fontsize = new_fontsize
-                        ptty.spacing = spacing
-                        ptty.font = ptty.load_font(path=None)
-                        if autofit:
-                            max_dim = ptty.fit(portrait)
-                            print("Automatic resize of TTY to {} rows, {} columns".format(max_dim[1], max_dim[0]))
-                            ptty.set_tty_size(ptty.ttydev(vcsa), max_dim[1], max_dim[0])
-                        oldbuff = None
-                    else:
-                        print('Font size not changed')
-                elif ch == 'c':
-                    flags['scrub_requested'] = True
-                elif ch == 'i':
-                    ptty.clear()
-                    oldimage = None
-                    oldbuff = None
-                elif ch == 'r':
-                    if oldimage:
-                        ptty.driver.reset()
-                        ptty.driver.init()
-                        ptty.driver.draw(0, 0, oldimage)
-                        ptty.driver.reset()
-                        ptty.driver.init()
-
             with open(vcsa, 'rb') as f:
                 with open(vcsudev, 'rb') as vcsu:
                     # read the first 4 bytes to get the console attributes
