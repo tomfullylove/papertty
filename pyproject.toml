@@ -2,10 +2,10 @@
 name = "papertty"
 version = "0.1.8"
 description = "Python module to render a TTY or VNC on e-ink"
-authors = ["Jouko Strömmer <jouko.strommer@iki.fi>"]
+authors = ["Jouko Strömmer <jouko.strommer@iki.fi>", "Tom Fullylove <t.fullylove@hotmail.co.uk>"]
 readme = "README.md"
-repository = "https://github.com/joukos/PaperTTY"
-homepage = "https://github.com/joukos/PaperTTY"
+repository = "https://github.com/tomfullylove/papertty"
+homepage = "https://github.com/tomfullylove/papertty"
 
 [tool.poetry.dependencies]
 click = "^7.1.2"
@@ -13,11 +13,10 @@ Pillow = "7.1.2"
 python = "^3.11"
 "RPi.GPIO" = "^0.7.0"
 spidev = "^3.4"
-vncdotool = "^1.0.0"
 twisted = "23.8.0"
 
 [tool.poetry.scripts]
-papertty = "papertty.papertty:cli"
+papertty = "papertty.papertty:terminal"
 
 [build-system]
 requires = ["poetry>=0.12"]
