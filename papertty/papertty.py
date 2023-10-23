@@ -123,7 +123,6 @@ class PaperTTY:
         tty_kernel_major = 4
         vcsa_range = range(128, 191)
         tty_range = range(1, 63)
-
         tty = PaperTTY.ttydev(vcsa)
         vs = os.stat(vcsa)
         ts = os.stat(tty)
@@ -315,8 +314,8 @@ class Settings:
 @click.option('--nocursor', default=False, is_flag=True, help="(DEPRECATED, use --cursor=none instead) Don't draw the cursor")
 @click.option('--cursor', default='legacy', help='Set cursor type. Valid values are default (underscore cursor at a sensible place), block (inverts colors at cursor), none (draws no cursor) or a number n (underscore cursor n pixels from the bottom)', show_default=False)
 @click.option('--sleep', default=0.1, help='Minimum sleep between refreshes', show_default=True)
-@click.option('--rows', 'ttyrows', default=None, help='Set TTY rows (--cols required too)')
-@click.option('--cols', 'ttycols', default=None, help='Set TTY columns (--rows required too)')
+@click.option('--rows', 'ttyrows', default=12, help='Set TTY rows')
+@click.option('--cols', 'ttycols', default=45, help='Set TTY columns')
 @click.option('--portrait', default=False, is_flag=True, help='Use portrait orientation', show_default=False)
 @click.option('--flipx', default=False, is_flag=True, help='Flip X axis (EXPERIMENTAL/BROKEN)', show_default=False)
 @click.option('--flipy', default=False, is_flag=True, help='Flip Y axis (EXPERIMENTAL/BROKEN)', show_default=False)
