@@ -3,7 +3,7 @@ from PIL import Image
 from . import epdconfig
 
 # Display resolution
-EPD_WIDTH       = 122
+EPD_WIDTH       = 128
 EPD_HEIGHT      = 250
 
 logger = logging.getLogger(__name__)
